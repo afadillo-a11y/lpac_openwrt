@@ -1,132 +1,156 @@
-- name: Build in OpenWrt SDK
-  shell: bash
-  run: |
-    set -euxo pipefail
+name: build-lpac-openwrt-aarch64-musl-qmi
 
-    docker pull openwrt/sdk:${SDK_TAG}
+on:
+  workflow_dispatch:
 
-    docker run --rm \
-      --user root \
-      -v "${GITHUB_WORKSPACE}:/work" \
-      -w /builder \
-      openwrt/sdk:${SDK_TAG} \
-      /bin/bash -lc '
-        set -euxo pipefail
+jobs:
+  build:
+    runs-on: ubuntu-24.04
 
-        if [ ! -d ./scripts ]; then
-          ./setup.sh
-        fi
+    env:
+      SDK_TAG: aarch64_cortex-a53-24.10.5
 
-        if command -v apt-get >/dev/null 2>&1; then
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            curl \
-            tar \
-            xz-utils \
-            file \
-            binutils \
-            pkg-config
-        elif command -v apk >/dev/null 2>&1; then
-          apk update
-          apk add \
-            curl \
-            tar \
-            xz \
-            file \
-            binutils \
-            pkgconf
-        elif command -v dnf >/dev/null 2>&1; then
-          dnf install -y \
-            curl \
-            tar \
-            xz \
-            file \
-            binutils \
-            pkgconf-pkg-config
-        else
-          echo "No supported package manager found"
-          exit 1
-        fi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-        CMAKE_VER=3.30.5
-        CMAKE_DIR=/tmp/cmake
-        mkdir -p "$CMAKE_DIR"
+      - name: Build in OpenWrt SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-        ARCH="$(uname -m)"
-        case "$ARCH" in
-          x86_64) CMAKE_ARCH=x86_64 ;;
-          aarch64) CMAKE_ARCH=aarch64 ;;
-          *) echo "Unsupported host arch: $ARCH"; exit 1 ;;
-        esac
+          docker pull openwrt/sdk:${SDK_TAG}
 
-        curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CMAKE_ARCH}.tar.gz" \
-          -o /tmp/cmake.tar.gz
+          docker run --rm \
+            --user root \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /builder \
+            openwrt/sdk:${SDK_TAG} \
+            /bin/bash -lc '
+              set -euxo pipefail
 
-        tar -xzf /tmp/cmake.tar.gz -C "$CMAKE_DIR" --strip-components=1
-        export PATH="$CMAKE_DIR/bin:$PATH"
+              if [ ! -d ./scripts ]; then
+                ./setup.sh
+              fi
 
-        cmake --version
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                  curl \
+                  tar \
+                  xz-utils \
+                  file \
+                  binutils \
+                  pkg-config
+              elif command -v apk >/dev/null 2>&1; then
+                apk update
+                apk add \
+                  curl \
+                  tar \
+                  xz \
+                  file \
+                  binutils \
+                  pkgconf
+              elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y \
+                  curl \
+                  tar \
+                  xz \
+                  file \
+                  binutils \
+                  pkgconf-pkg-config
+              else
+                echo "No supported package manager found"
+                exit 1
+              fi
 
-        ./scripts/feeds update -a
-        ./scripts/feeds install libcurl
-        ./scripts/feeds install libmbim
-        ./scripts/feeds install libqmi
-        ./scripts/feeds install libqrtr-glib
-        ./scripts/feeds install glib2
-        ./scripts/feeds install pkgconf
+              CMAKE_VER=3.30.5
+              CMAKE_DIR=/tmp/cmake
+              mkdir -p "$CMAKE_DIR"
 
-        make defconfig
+              ARCH="$(uname -m)"
+              case "$ARCH" in
+                x86_64) CMAKE_ARCH=x86_64 ;;
+                aarch64) CMAKE_ARCH=aarch64 ;;
+                *) echo "Unsupported host arch: $ARCH"; exit 1 ;;
+              esac
 
-        TOOLCHAIN_BIN="$(find staging_dir/toolchain-* -type d -path "*/bin" | head -n1)"
-        STAGING_DIR_TARGET="$(find staging_dir/target-* -maxdepth 0 -type d | head -n1)"
+              curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CMAKE_ARCH}.tar.gz" \
+                -o /tmp/cmake.tar.gz
 
-        test -n "$TOOLCHAIN_BIN"
-        test -n "$STAGING_DIR_TARGET"
+              tar -xzf /tmp/cmake.tar.gz -C "$CMAKE_DIR" --strip-components=1
+              export PATH="$CMAKE_DIR/bin:$PATH"
 
-        export PATH="$TOOLCHAIN_BIN:$PATH"
-        export CC=aarch64-openwrt-linux-musl-gcc
-        export CXX=aarch64-openwrt-linux-musl-g++
-        export AR=aarch64-openwrt-linux-musl-gcc-ar
-        export RANLIB=aarch64-openwrt-linux-musl-gcc-ranlib
-        export STRIP=aarch64-openwrt-linux-musl-strip
+              cmake --version
 
-        export CFLAGS="-Os -pipe"
-        export CXXFLAGS="-Os -pipe"
-        export LDFLAGS="-Wl,-rpath,/usr/lib/lpac"
+              ./scripts/feeds update -a
+              ./scripts/feeds install libcurl
+              ./scripts/feeds install libmbim
+              ./scripts/feeds install libqmi
+              ./scripts/feeds install libqrtr-glib
+              ./scripts/feeds install glib2
+              ./scripts/feeds install pkgconf
 
-        export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR_TARGET"
-        export PKG_CONFIG_PATH="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
-        export PKG_CONFIG_LIBDIR="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
+              make defconfig
 
-        rm -rf /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
-        mkdir -p /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
+              TOOLCHAIN_BIN="$(find staging_dir/toolchain-* -type d -path "*/bin" | head -n1)"
+              STAGING_DIR_TARGET="$(find staging_dir/target-* -maxdepth 0 -type d | head -n1)"
 
-        cmake -S /work -B /tmp/lpac-build \
-          -G "Unix Makefiles" \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_SYSTEM_NAME=Linux \
-          -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-          -DCMAKE_INSTALL_PREFIX=/usr \
-          -DCMAKE_C_COMPILER="$CC" \
-          -DCMAKE_CXX_COMPILER="$CXX" \
-          -DCMAKE_FIND_ROOT_PATH="$STAGING_DIR_TARGET" \
-          -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-          -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-          -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-          -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
-          -DCMAKE_PREFIX_PATH="$STAGING_DIR_TARGET/usr" \
-          -DCMAKE_INSTALL_RPATH=/usr/lib/lpac \
-          -DLPAC_WITH_APDU_QMI=ON \
-          -DLPAC_WITH_APDU_QMI_QRTR=ON \
-          -DLPAC_WITH_APDU_MBIM=ON
+              test -n "$TOOLCHAIN_BIN"
+              test -n "$STAGING_DIR_TARGET"
 
-        cmake --build /tmp/lpac-build -j"$(nproc)"
-        DESTDIR=/tmp/lpac-stage cmake --install /tmp/lpac-build
+              export PATH="$TOOLCHAIN_BIN:$PATH"
+              export CC=aarch64-openwrt-linux-musl-gcc
+              export CXX=aarch64-openwrt-linux-musl-g++
+              export AR=aarch64-openwrt-linux-musl-gcc-ar
+              export RANLIB=aarch64-openwrt-linux-musl-gcc-ranlib
+              export STRIP=aarch64-openwrt-linux-musl-strip
 
-        file /tmp/lpac-build/src/lpac || true
-        readelf -l /tmp/lpac-build/src/lpac | grep interpreter || true
-        readelf -d /tmp/lpac-build/src/lpac | grep NEEDED || true
+              export CFLAGS="-Os -pipe"
+              export CXXFLAGS="-Os -pipe"
+              export LDFLAGS="-Wl,-rpath,/usr/lib/lpac"
 
-        tar -C /tmp/lpac-stage -czf /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
-        cp -f /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz /work/
-      '
+              export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR_TARGET"
+              export PKG_CONFIG_PATH="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
+              export PKG_CONFIG_LIBDIR="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
+
+              rm -rf /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
+              mkdir -p /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
+
+              cmake -S /work -B /tmp/lpac-build \
+                -G "Unix Makefiles" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Linux \
+                -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_C_COMPILER="$CC" \
+                -DCMAKE_CXX_COMPILER="$CXX" \
+                -DCMAKE_FIND_ROOT_PATH="$STAGING_DIR_TARGET" \
+                -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+                -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+                -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+                -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+                -DCMAKE_PREFIX_PATH="$STAGING_DIR_TARGET/usr" \
+                -DCMAKE_INSTALL_RPATH=/usr/lib/lpac \
+                -DLPAC_WITH_APDU_QMI=ON \
+                -DLPAC_WITH_APDU_QMI_QRTR=ON \
+                -DLPAC_WITH_APDU_MBIM=ON
+
+              cmake --build /tmp/lpac-build -j"$(nproc)"
+              DESTDIR=/tmp/lpac-stage cmake --install /tmp/lpac-build
+
+              file /tmp/lpac-build/src/lpac || true
+              readelf -l /tmp/lpac-build/src/lpac | grep interpreter || true
+              readelf -d /tmp/lpac-build/src/lpac | grep NEEDED || true
+
+              tar -C /tmp/lpac-stage -czf /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
+              cp -f /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz /work/
+            '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lpac-openwrt-aarch64-musl-qmi
+          path: lpac-openwrt-aarch64-musl-qmi.tar.gz
