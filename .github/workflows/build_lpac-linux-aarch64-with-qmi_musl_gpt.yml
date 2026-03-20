@@ -78,16 +78,15 @@ jobs:
             -DLPAC_WITH_APDU_QMI_QRTR=ON \
             -DLPAC_WITH_APDU_MBIM=ON
 
+          # Обновленный блок установки: забираем ВСЕ библиотеки (.so*)
           define Package/lpac/install
-          @$(INSTALL_DIR) $(1)/usr/bin
+          @$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/lib
           @$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
           @if [ -d "$(PKG_INSTALL_DIR)/usr/lib/lpac" ]; then \
-          @  $(INSTALL_DIR) $(1)/usr/lib; \
           @  $(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/; \
           @fi
-          @if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* >/dev/null 2>&1; then \
-          @  $(INSTALL_DIR) $(1)/usr/lib; \
-          @  $(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* $(1)/usr/lib/; \
+          @if ls $(PKG_INSTALL_DIR)/usr/lib/*.so* >/dev/null 2>&1; then \
+          @  $(CP) $(PKG_INSTALL_DIR)/usr/lib/*.so* $(1)/usr/lib/; \
           @fi
           endef
 
