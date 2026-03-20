@@ -1,21 +1,3 @@
-name: build-lpac-openwrt-aarch64-musl-qmi
-
-on:
-  workflow_dispatch:
-
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-
-    env:
-      SDK_TAG: aarch64_cortex-a53-24.10.5
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
       - name: Build in OpenWrt SDK
         shell: bash
         run: |
@@ -38,29 +20,12 @@ jobs:
               if command -v apt-get >/dev/null 2>&1; then
                 apt-get update
                 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                  curl \
-                  tar \
-                  xz-utils \
-                  file \
-                  binutils \
-                  pkg-config
+                  curl tar xz-utils file binutils pkg-config
               elif command -v apk >/dev/null 2>&1; then
                 apk update
-                apk add \
-                  curl \
-                  tar \
-                  xz \
-                  file \
-                  binutils \
-                  pkgconf
+                apk add curl tar xz file binutils pkgconf
               elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y \
-                  curl \
-                  tar \
-                  xz \
-                  file \
-                  binutils \
-                  pkgconf-pkg-config
+                dnf install -y curl tar xz file binutils pkgconf-pkg-config
               else
                 echo "No supported package manager found"
                 exit 1
@@ -79,7 +44,6 @@ jobs:
 
               curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CMAKE_ARCH}.tar.gz" \
                 -o /tmp/cmake.tar.gz
-
               tar -xzf /tmp/cmake.tar.gz -C "$CMAKE_DIR" --strip-components=1
               export PATH="$CMAKE_DIR/bin:$PATH"
 
@@ -95,18 +59,29 @@ jobs:
 
               make defconfig
 
-              TOOLCHAIN_BIN="$(find staging_dir/toolchain-* -type d -path "*/bin" | head -n1)"
-              STAGING_DIR_TARGET="$(find staging_dir/target-* -maxdepth 0 -type d | head -n1)"
+              STAGING_DIR_TARGET="$(find "$PWD/staging_dir" -maxdepth 1 -type d -name "target-*" | head -n1)"
 
-              test -n "$TOOLCHAIN_BIN"
+              CC_PATH="$(find "$PWD/staging_dir" -type f -name "aarch64-openwrt-linux-musl-gcc" | head -n1)"
+              CXX_PATH="$(find "$PWD/staging_dir" -type f -name "aarch64-openwrt-linux-musl-g++" | head -n1)"
+              AR_PATH="$(find "$PWD/staging_dir" -type f -name "aarch64-openwrt-linux-musl-gcc-ar" | head -n1)"
+              RANLIB_PATH="$(find "$PWD/staging_dir" -type f -name "aarch64-openwrt-linux-musl-gcc-ranlib" | head -n1)"
+              STRIP_PATH="$(find "$PWD/staging_dir" -type f -name "aarch64-openwrt-linux-musl-strip" | head -n1)"
+
               test -n "$STAGING_DIR_TARGET"
+              test -n "$CC_PATH"
+              test -n "$CXX_PATH"
+              test -n "$AR_PATH"
+              test -n "$RANLIB_PATH"
+              test -n "$STRIP_PATH"
 
-              export PATH="$TOOLCHAIN_BIN:$PATH"
-              export CC=aarch64-openwrt-linux-musl-gcc
-              export CXX=aarch64-openwrt-linux-musl-g++
-              export AR=aarch64-openwrt-linux-musl-gcc-ar
-              export RANLIB=aarch64-openwrt-linux-musl-gcc-ranlib
-              export STRIP=aarch64-openwrt-linux-musl-strip
+              export PATH="$(dirname "$CC_PATH"):/tmp/cmake/bin:$PATH"
+              export CC="$CC_PATH"
+              export CXX="$CXX_PATH"
+              export AR="$AR_PATH"
+              export RANLIB="$RANLIB_PATH"
+              export STRIP="$STRIP_PATH"
+
+              "$CC" --version
 
               export CFLAGS="-Os -pipe"
               export CXXFLAGS="-Os -pipe"
@@ -148,9 +123,3 @@ jobs:
               tar -C /tmp/lpac-stage -czf /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
               cp -f /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz /work/
             '
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: lpac-openwrt-aarch64-musl-qmi
-          path: lpac-openwrt-aarch64-musl-qmi.tar.gz
