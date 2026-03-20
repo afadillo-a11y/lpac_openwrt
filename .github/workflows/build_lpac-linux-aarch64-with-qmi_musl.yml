@@ -24,6 +24,7 @@ jobs:
           docker pull openwrt/sdk:${SDK_TAG}
 
           docker run --rm \
+            --user root \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /builder \
             openwrt/sdk:${SDK_TAG} \
@@ -34,8 +35,32 @@ jobs:
                 ./setup.sh
               fi
 
-              ./scripts/feeds update -a
+              if command -v apt-get >/dev/null 2>&1; then
+                apt-get update
+                DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                  cmake \
+                  pkg-config \
+                  file \
+                  binutils
+              elif command -v apk >/dev/null 2>&1; then
+                apk update
+                apk add \
+                  cmake \
+                  pkgconf \
+                  file \
+                  binutils
+              elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y \
+                  cmake \
+                  pkgconf-pkg-config \
+                  file \
+                  binutils
+              else
+                echo "No supported package manager found to install cmake"
+                exit 1
+              fi
 
+              ./scripts/feeds update -a
               ./scripts/feeds install libcurl
               ./scripts/feeds install libmbim
               ./scripts/feeds install libqmi
@@ -61,6 +86,10 @@ jobs:
               export CFLAGS="-Os -pipe"
               export CXXFLAGS="-Os -pipe"
               export LDFLAGS="-Wl,-rpath,/usr/lib/lpac"
+
+              export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR_TARGET"
+              export PKG_CONFIG_PATH="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
+              export PKG_CONFIG_LIBDIR="$STAGING_DIR_TARGET/usr/lib/pkgconfig:$STAGING_DIR_TARGET/usr/share/pkgconfig"
 
               rm -rf /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
               mkdir -p /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
