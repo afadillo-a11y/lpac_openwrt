@@ -66,35 +66,34 @@ jobs:
             -DLPAC_WITH_APDU_MBIM=ON
 
           define Package/lpac/install
-          	$(INSTALL_DIR) $(1)/usr/bin
-          	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
-
-          	if [ -d "$(PKG_INSTALL_DIR)/usr/lib/lpac" ]; then \
-          		$(INSTALL_DIR) $(1)/usr/lib; \
-          		$(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/; \
-          	fi
-
-          	if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* >/dev/null 2>&1; then \
-          		$(INSTALL_DIR) $(1)/usr/lib; \
-          		$(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* $(1)/usr/lib/; \
-          	fi
+          @$(INSTALL_DIR) $(1)/usr/bin
+          @$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
+          @if [ -d "$(PKG_INSTALL_DIR)/usr/lib/lpac" ]; then \
+          @  $(INSTALL_DIR) $(1)/usr/lib; \
+          @  $(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/; \
+          @fi
+          @if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* >/dev/null 2>&1; then \
+          @  $(INSTALL_DIR) $(1)/usr/lib; \
+          @  $(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc*.so* $(1)/usr/lib/; \
+          @fi
           endef
 
           $(eval $(call BuildPackage,lpac))
           EOF
 
+          # Замена @ на табы для корректного Makefile
+          sed -i 's/^@/\t/' openwrt-feed/lpac/Makefile
+
           cat > .github/openwrt-helper/build.sh <<'EOF'
           #!/bin/bash
           set -euxo pipefail
 
+          git config --global --add safe.directory /work
           cd /builder
 
-          if [ ! -d ./scripts ]; then
-            ./setup.sh
-          fi
+          [ ! -d ./scripts ] && ./setup.sh
 
           echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
-
           ./scripts/feeds update -a
           ./scripts/feeds install -p custom lpac
           ./scripts/feeds install libcurl libmbim libqmi libqrtr-glib glib2 pkgconf
@@ -110,29 +109,31 @@ jobs:
 
           make defconfig
 
-          make package/libs/glib2/compile V=s -j"$(nproc)"
-          make package/feeds/packages/libmbim/compile V=s -j"$(nproc)"
-          make package/feeds/packages/libqmi/compile V=s -j"$(nproc)"
-          make package/feeds/packages/libqrtr-glib/compile V=s -j"$(nproc)"
-          make package/feeds/packages/curl/compile V=s -j"$(nproc)"
-          make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
+          # Сборка зависимостей и самого lpac
+          make package/glib2/compile V=s -j"$(nproc)"
+          make package/libmbim/compile V=s -j"$(nproc)"
+          make package/libqmi/compile V=s -j"$(nproc)"
+          make package/libqrtr-glib/compile V=s -j"$(nproc)"
+          make package/curl/compile V=s -j"$(nproc)"
+          make package/lpac/compile V=s -j"$(nproc)"
 
           mkdir -p /work/dist /tmp/lpac-unpack
-
-          IPK="$(find bin/packages -type f -name 'lpac_*.ipk' | head -n1)"
-          test -n "$IPK"
-
-          cp -v "$IPK" /work/dist/lpac.ipk
-
-          cd /tmp/lpac-unpack
-          ar x "$IPK"
-          tar -xf data.tar.*
-
-          file ./usr/bin/lpac || true
-          readelf -l ./usr/bin/lpac | grep interpreter || true
-          readelf -d ./usr/bin/lpac | grep NEEDED || true
-
-          tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
+          
+          # Находим и переименовываем IPK для RAX3000M
+          ORIG_IPK="$(find bin/packages -type f -name 'lpac_*.ipk' | head -n1)"
+          if [ -n "$ORIG_IPK" ]; then
+            FINAL_NAME="lpac_2.3.0-1_aarch64_cortex-a53.ipk"
+            cp -v "$ORIG_IPK" "/work/dist/$FINAL_NAME"
+            
+            # Также делаем распакованный tar.gz для "ленивой" установки
+            cd /tmp/lpac-unpack
+            ar x "/work/dist/$FINAL_NAME"
+            tar -xf data.tar.*
+            tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
+          else
+            echo "Error: IPK not found!"
+            exit 1
+          fi
           EOF
 
           chmod +x .github/openwrt-helper/build.sh
@@ -140,10 +141,7 @@ jobs:
       - name: Build in OpenWrt SDK
         shell: bash
         run: |
-          set -euxo pipefail
-
           docker pull openwrt/sdk:${SDK_TAG}
-
           docker run --rm \
             --user root \
             -v "${GITHUB_WORKSPACE}:/work" \
@@ -151,8 +149,10 @@ jobs:
             openwrt/sdk:${SDK_TAG} \
             /bin/bash /work/.github/openwrt-helper/build.sh
 
-      - name: Upload artifact
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lpac-openwrt-aarch64-musl-qmi
-          path: dist/lpac-openwrt-aarch64-musl-qmi.tar.gz
+          name: lpac-rax3000m-package
+          path: |
+            dist/*.ipk
+            dist/*.tar.gz
