@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     env:
       SDK_TAG: aarch64_cortex-a53-24.10.5
 
@@ -76,10 +77,10 @@ jobs:
           	if [ -d "$(PKG_INSTALL_DIR)/usr/lib/lpac" ]; then \
           		$(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/; \
           	fi
-          	if [ -f "$(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so" ]; then \
+          	if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so* >/dev/null 2>&1; then \
           		$(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so* $(1)/usr/lib/; \
           	fi
-          	if [ -f "$(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so" ]; then \
+          	if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so* >/dev/null 2>&1; then \
           		$(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so* $(1)/usr/lib/; \
           	fi
           endef
@@ -101,19 +102,20 @@ jobs:
             /bin/bash -lc '
               set -euxo pipefail
 
-              [ -d ./scripts ] || ./setup.sh
+              if [ ! -d ./scripts ]; then
+                ./setup.sh
+              fi
 
               echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
 
               ./scripts/feeds update -a
               ./scripts/feeds install -p custom lpac
 
-              cat > .config <<'"'"'CFG'"'"'
-CONFIG_PACKAGE_lpac=y
-CFG
+              printf "%s\n" "CONFIG_PACKAGE_lpac=y" > .config
 
               make defconfig
-              make package/feeds/custom/lpac/{clean,compile} V=s -j"$(nproc)"
+              make package/feeds/custom/lpac/clean V=s
+              make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
 
               mkdir -p /work/dist /work/unpack
 
@@ -139,4 +141,4 @@ CFG
           name: lpac-openwrt-aarch64-qmi-qrtr
           path: |
             dist/lpac-openwrt-aarch64-qmi-qrtr.tar.gz
-            dist/lpac_*.ipk
+            dist/*.ipk
