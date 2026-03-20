@@ -1,3 +1,21 @@
+name: build-lpac-openwrt-aarch64-musl-qmi
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      SDK_TAG: aarch64_cortex-a53-24.10.5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Build in OpenWrt SDK
         shell: bash
         run: |
@@ -19,8 +37,7 @@
 
               if command -v apt-get >/dev/null 2>&1; then
                 apt-get update
-                DEBIAN_FRONTEND=noninteractive apt-get install -y \
-                  curl tar xz-utils file binutils pkg-config
+                DEBIAN_FRONTEND=noninteractive apt-get install -y curl tar xz-utils file binutils pkg-config
               elif command -v apk >/dev/null 2>&1; then
                 apk update
                 apk add curl tar xz file binutils pkgconf
@@ -42,8 +59,7 @@
                 *) echo "Unsupported host arch: $ARCH"; exit 1 ;;
               esac
 
-              curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CMAKE_ARCH}.tar.gz" \
-                -o /tmp/cmake.tar.gz
+              curl -L "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-linux-${CMAKE_ARCH}.tar.gz" -o /tmp/cmake.tar.gz
               tar -xzf /tmp/cmake.tar.gz -C "$CMAKE_DIR" --strip-components=1
               export PATH="$CMAKE_DIR/bin:$PATH"
 
@@ -123,3 +139,9 @@
               tar -C /tmp/lpac-stage -czf /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
               cp -f /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz /work/
             '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lpac-openwrt-aarch64-musl-qmi
+          path: lpac-openwrt-aarch64-musl-qmi.tar.gz
