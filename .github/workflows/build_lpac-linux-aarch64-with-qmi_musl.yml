@@ -1,136 +1,264 @@
-name: build-lpac-openwrt-musl-aarch64
+name: build-openwrt-aarch64-musl
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+
     env:
-      SDK_TAG: aarch64_cortex-a53-24.10.5
+      TARGET_TRIPLE: aarch64-linux-musl
+      ZIG_VERSION: 0.13.0
+      ZLIB_VERSION: 1.3.2
+      OPENSSL_VERSION: 3.0.19
 
     steps:
-      - name: Checkout lpac repo
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Prepare custom OpenWrt package feed
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            perl \
+            pkg-config \
+            python3 \
+            qemu-user \
+            tar \
+            xz-utils
+
+      - name: Install Zig
+        run: |
+          curl -fL --retry 5 --retry-delay 3 \
+            -o zig.tar.xz \
+            https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz
+          tar -xf zig.tar.xz
+          echo "${GITHUB_WORKSPACE}/zig-linux-x86_64-${ZIG_VERSION}" >> "${GITHUB_PATH}"
+
+      - name: Show tool versions
+        run: |
+          zig version
+          cc --version || true
+          perl -v | head -n 2
+
+      - name: Build zlib (static)
+        run: |
+          curl -fL --retry 5 --retry-delay 3 \
+            -o zlib.tar.gz \
+            https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz
+          tar -xzf zlib.tar.gz
+          cd zlib-${ZLIB_VERSION}
+
+          export CC="zig cc -target ${TARGET_TRIPLE}"
+          export AR="zig ar"
+          export RANLIB="zig ranlib"
+
+          CHOST=${TARGET_TRIPLE} ./configure --static --prefix="${GITHUB_WORKSPACE}/deps"
+          make -j"$(nproc)"
+          make install
+
+          test -f "${GITHUB_WORKSPACE}/deps/lib/libz.a"
+
+      - name: Build OpenSSL (static)
+        run: |
+          curl -fL --retry 5 --retry-delay 3 \
+            -o openssl.tar.gz \
+            https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz
+          tar -xzf openssl.tar.gz
+          cd openssl-${OPENSSL_VERSION}
+
+          export CC="zig cc -target ${TARGET_TRIPLE}"
+          export AR="zig ar"
+          export RANLIB="zig ranlib"
+
+          ./Configure linux-aarch64 \
+            no-shared \
+            no-module \
+            no-dso \
+            no-tests \
+            --prefix="${GITHUB_WORKSPACE}/deps"
+
+          make -j"$(nproc)"
+          make install_sw
+
+          test -f "${GITHUB_WORKSPACE}/deps/lib/libcrypto.a"
+
+      - name: Patch Makefile for cross-build
         shell: bash
         run: |
-          set -eux
+          cp Makefile Makefile.orig
 
-          mkdir -p openwrt-feed/lpac
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("Makefile")
+          if p.exists():
+              s = p.read_text()
+              s = s.replace("HOST_ARCH := $(shell arch)", "HOST_ARCH ?= aarch64")
+              s = s.replace("LDFLAGS := $(COMMON_LDFLAGS)", "LDFLAGS ?= $(COMMON_LDFLAGS)")
+              s = s.replace("CFLAGS := $(COMMON_CFLAGS) $(BITNESS_FLAGS)", "CFLAGS ?= $(COMMON_CFLAGS) $(BITNESS_FLAGS)")
+              p.write_text(s)
+          PY
 
-          cat > openwrt-feed/lpac/Makefile <<'EOF'
-          include $(TOPDIR)/rules.mk
+          echo "===== Makefile diff ====="
+          diff -u Makefile.orig Makefile || true
 
-          PKG_NAME:=lpac
-          PKG_VERSION:=2.3.0
-          PKG_RELEASE:=1
-
-          PKG_SOURCE_PROTO:=git
-          PKG_SOURCE_URL:=file:///work
-          PKG_SOURCE_VERSION:=$(shell cd /work && git rev-parse HEAD)
-          PKG_MIRROR_HASH:=skip
-
-          PKG_LICENSE:=AGPL-3.0-only LGPL-2.0-only
-          PKG_MAINTAINER:=custom
-          PKG_BUILD_PARALLEL:=1
-          CMAKE_INSTALL:=1
-
-          include $(INCLUDE_DIR)/package.mk
-          include $(INCLUDE_DIR)/cmake.mk
-
-          define Package/lpac
-            SECTION:=utils
-            CATEGORY:=Utilities
-            TITLE:=eUICC eSIM LPA written in C
-            URL:=https://github.com/estkme-group/lpac
-            DEPENDS:=+libcurl +libqmi +libqrtr-glib
-          endef
-
-          define Package/lpac/description
-            lpac built from git with QMI and QMI-over-QRTR enabled.
-          endef
-
-          TARGET_CFLAGS += $(FPIC)
-
-          CMAKE_OPTIONS += \
-            -DUSE_SYSTEM_DEPS=ON \
-            -DSTANDALONE_MODE=OFF \
-            -DLPAC_WITH_HTTP_CURL=ON \
-            -DLPAC_WITH_APDU_PCSC=OFF \
-            -DLPAC_WITH_APDU_AT=OFF \
-            -DLPAC_WITH_APDU_GBINDER=OFF \
-            -DLPAC_WITH_APDU_UQMI=OFF \
-            -DLPAC_WITH_APDU_MBIM=OFF \
-            -DLPAC_WITH_APDU_QMI=ON \
-            -DLPAC_WITH_APDU_QMI_QRTR=ON
-
-          define Package/lpac/install
-          	$(INSTALL_DIR) $(1)/usr/bin
-          	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
-
-          	$(INSTALL_DIR) $(1)/usr/lib
-          	[ ! -d $(PKG_INSTALL_DIR)/usr/lib/lpac ] || $(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/
-          	[ ! -f $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so ] || $(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so* $(1)/usr/lib/
-          	[ ! -f $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so ] || $(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so* $(1)/usr/lib/
-          endef
-
-          $(eval $(call BuildPackage,lpac))
-          EOF
-
-      - name: Build inside OpenWrt SDK
+      - name: Patch sources for aarch64 + musl
         shell: bash
         run: |
-          set -eux
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
 
-          docker pull openwrt/sdk:${SDK_TAG}
+          def patch_file(path, patches):
+              p = Path(path)
+              if not p.exists(): return
+              content = p.read_text(encoding='utf-8')
+              # Используем lambda чтобы re.sub не экранировал \n внутри C-строк
+              for pattern, repl in patches:
+                  content = re.sub(pattern, lambda _, r=repl: r, content, flags=re.DOTALL)
+              p.write_text(content, encoding='utf-8')
 
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/work" \
-            -w /builder \
-            openwrt/sdk:${SDK_TAG} \
-            bash -lc '
-              set -eux
+          # 1) engine/engine-rpc.h
+          patch_file("engine/engine-rpc.h", [
+              (r'#include\s+<x86intrin\.h>', '#if defined(__i386__) || defined(__x86_64__)\n#include <x86intrin.h>\n#endif')
+          ])
 
-              [ -d ./scripts ] || ./setup.sh
+          # 2) common/precise-time.h
+          patch_file("common/precise-time.h", [
+              (r'#endif\s*/\*\s*net-event\.h\s*\*/', '#else\nstatic __inline__ unsigned long long rdtsc(void) {\n  struct timespec ts;\n  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);\n  return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;\n}\n#endif\n/* net-event.h */')
+          ])
 
-              echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
+          # 3) common/server-functions.h
+          patch_file("common/server-functions.h", [
+              (r'static\s+inline\s+void\s+mfence\s*\(\s*void\s*\)\s*\{\s*asm\s+volatile\s*\(\s*"mfence"\s*:\s*:\s*:"memory"\s*\);\s*\}', 'static inline void mfence (void) {\n#if defined(__i386__) || defined(__x86_64__)\n  asm volatile ("mfence": : :"memory");\n#else\n  __sync_synchronize();\n#endif\n}')
+          ])
 
-              ./scripts/feeds update -a
-              ./scripts/feeds install -a
+          # 4) jobs/jobs.h & jobs.c
+          patch_file("jobs/jobs.h", [
+              (r'struct\s+drand48_data\s+rand_data;', 'unsigned short rand_data[3];')
+          ])
+          patch_file("jobs/jobs.c", [
+              (r'lrand48_r\s*\([^,]+,\s*&t\);', 'return nrand48(this_job_thread->rand_data);'),
+              (r'mrand48_r\s*\([^,]+,\s*&t\);', 'return jrand48(this_job_thread->rand_data);'),
+              (r'drand48_r\s*\([^,]+,\s*&t\);', 'return erand48(this_job_thread->rand_data);'),
+              (r'srand48_r\s*\([^;]+;', '{\n  unsigned long long seed = (unsigned long long)rdtsc() ^ (unsigned long long)lrand48();\n  JT->rand_data[0] = (unsigned short)(seed & 0xffffu);\n  JT->rand_data[1] = (unsigned short)((seed >> 16) & 0xffffu);\n  JT->rand_data[2] = (unsigned short)((seed >> 32) & 0xffffu);\n}')
+          ])
 
-              cat > .config <<CFG
-              CONFIG_ALL_NONSHARED=n
-              CONFIG_ALL_KMODS=n
-              CONFIG_PACKAGE_lpac=y
-              CONFIG_PACKAGE_libcurl=y
-              CONFIG_PACKAGE_libqmi=y
-              CONFIG_PACKAGE_libqrtr-glib=y
-              CFG
+          # 5) common/cpuid.c
+          patch_file("common/cpuid.c", [
+              (r'#include\s+<cpuid\.h>', '#if defined(__i386__) || defined(__x86_64__)\n#include <cpuid.h>\n#endif'),
+              (r'kdb_cpuid_t\s*\*kdb_cpuid\s*\(void\)\s*\{.*', 'kdb_cpuid_t *kdb_cpuid (void) {\n#if defined(__i386__) || defined(__x86_64__)\n  static kdb_cpuid_t cached = { .magic = 0 };\n  if (cached.magic) {\n    assert (cached.magic == CPUID_MAGIC);\n    return &cached;\n  }\n  unsigned int a;\n  assert(__get_cpuid(1, &a, (unsigned int*) &cached.ebx, (unsigned int*) &cached.ecx, (unsigned int*) &cached.edx) != 0);\n  cached.magic = CPUID_MAGIC;\n  return &cached;\n#else\n  static kdb_cpuid_t cached = { .magic = 0x280147b8, .ebx = 0, .ecx = 0, .edx = 0 };\n  return &cached;\n#endif\n}')
+          ])
 
-              make defconfig
-              make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
+          # 6) common/crc32c.c and common/crc32.c
+          patch_file("common/crc32c.c", [
+              (r'#include\s+<wmmintrin\.h>', '#if defined(__i386__) || defined(__x86_64__)\n#include <wmmintrin.h>\n#endif'),
+              (r'#ifdef\s+__LP64__', '#if defined(__x86_64__)'),
+              (r'#else\s*static\s+unsigned\s+crc32c_partial_sse42', '#elif defined(__i386__)\nstatic unsigned crc32c_partial_sse42'),
+              (r'void\s+crc32c_init\s*\(void\)\s*\{.*', 'void crc32c_init (void) {\n  compute_crc32c_combine = &crc32c_combine_generic;\n#if defined(__i386__) || defined(__x86_64__)\n  kdb_cpuid_t *p = kdb_cpuid ();\n  if (p->ecx & (1 << 20)) {\n    crc32c_partial = crc32c_partial_sse42;\n  #ifdef __x86_64__\n    if (p->ecx & 2) {\n      crc32c_partial = crc32c_partial_sse42_clmul;\n      compute_crc32c_combine = &crc32c_combine_clmul;\n    }\n  #endif\n  } else {\n    crc32c_partial = &crc32c_partial_four_tables;\n  }\n#else\n  crc32c_partial = &crc32c_partial_four_tables;\n#endif\n}')
+          ])
+          
+          patch_file("common/crc32.c", [
+              (r'#include\s+<wmmintrin\.h>', '#if defined(__i386__) || defined(__x86_64__)\n#include <wmmintrin.h>\n#endif'),
+              (r'void\s+crc32_init\s*\(void\)\s*\{.*', 'void crc32_init (void) {\n#if defined(__i386__) || defined(__x86_64__)\n  kdb_cpuid_t *p = kdb_cpuid ();\n  if (p->ecx & 2) {\n    crc32_partial = crc32_partial_clmul;\n    crc64_partial = crc64_partial_clmul;\n    compute_crc32_combine = compute_crc32_combine_clmul;\n    compute_crc64_combine = compute_crc64_combine_clmul;\n  } else {\n    crc32_partial = crc32_partial_generic;\n    crc64_partial = crc64_partial_one_table;\n    compute_crc32_combine = compute_crc32_combine_generic;\n    compute_crc64_combine = compute_crc64_combine_generic;\n  }\n#else\n  crc32_partial = crc32_partial_generic;\n  crc64_partial = crc64_partial_one_table;\n  compute_crc32_combine = compute_crc32_combine_generic;\n  compute_crc64_combine = compute_crc64_combine_generic;\n#endif\n}')
+          ])
 
-              PKG_DIR="$(find build_dir/target-*/lpac-*/ipkg-install -type d | head -n1)"
-              test -n "$PKG_DIR"
+          # 7) common/server-functions.c
+          patch_file("common/server-functions.c", [
+              (r'#include\s+<execinfo\.h>', '#if defined(__GLIBC__)\n#include <execinfo.h>\n#endif'),
+              (r'void\s+print_backtrace\s*\(void\)\s*\{.*?\}', '''void print_backtrace (void) {
+#if defined(__GLIBC__)
+  void *buffer[64];
+  int nptrs = backtrace (buffer, 64);
+  kwrite (2, "\\n------- Stack Backtrace -------\\n", 33);
+  backtrace_symbols_fd (buffer, nptrs, 2);
+  kwrite (2, "-------------------------------\\n", 32);
+  const char *s = get_version_string ();
+  if (s) {
+    kwrite (2, s, strlen (s));
+    kwrite (2, "\\n", 1);
+  }
+#else
+  kwrite (2, "\\n------- Stack Backtrace -------\\n", 33);
+  kwrite (2, "backtrace unavailable on musl\\n", 30);
+  kwrite (2, "-------------------------------\\n", 32);
+#endif
+}''')
+          ])
+          PY
 
-              mkdir -p /work/dist
-              mkdir -p /work/out
+      - name: Build MTProxy (static musl)
+        shell: bash
+        run: |
+          make clean || true
 
-              cp -a "$PKG_DIR"/usr /work/out/
+          export HOST_ARCH=aarch64
+          export CC="zig cc -target ${TARGET_TRIPLE}"
+          export CXX="zig c++ -target ${TARGET_TRIPLE}"
+          export AR="zig ar"
+          export RANLIB="zig ranlib"
 
-              file /work/out/usr/bin/lpac || true
-              readelf -l /work/out/usr/bin/lpac | grep interpreter || true
-              readelf -d /work/out/usr/bin/lpac | grep NEEDED || true
+          export CFLAGS="-O2 -pipe -static \
+            -I${GITHUB_WORKSPACE}/deps/include \
+            -fno-strict-aliasing -fno-strict-overflow -fwrapv \
+            -DAES=1 -D_GNU_SOURCE=1 -D_FILE_OFFSET_BITS=64 \
+            -Wno-array-bounds -Wno-implicit-function-declaration"
 
-              tar -C /work/out -czf /work/dist/lpac-openwrt-aarch64-musl-qmi-qrtr.tar.gz usr
-            '
+          export LDFLAGS="-static \
+            -L${GITHUB_WORKSPACE}/deps/lib \
+            -L${GITHUB_WORKSPACE}/deps/lib64 \
+            -Wl,--start-group -lcrypto -lz -lpthread -lm -lrt -Wl,--end-group"
 
-      - name: Upload artifact
+          echo "HOST_ARCH=${HOST_ARCH}"
+          echo "CC=${CC}"
+          echo "CFLAGS=${CFLAGS}"
+          echo "LDFLAGS=${LDFLAGS}"
+
+          make V=1 2>&1 | tee build.log
+
+      - name: Inspect binary
+        if: always()
+        shell: bash
+        run: |
+          set -x
+          ls -lah objs/bin || true
+          file objs/bin/mtproto-proxy || true
+          readelf -h objs/bin/mtproto-proxy || true
+          readelf -d objs/bin/mtproto-proxy || true
+          strings objs/bin/mtproto-proxy | grep -Ei 'musl|glibc|openssl|zlib' | head -n 50 || true
+
+      - name: Smoke test under qemu
+        if: always()
+        shell: bash
+        run: |
+          qemu-aarch64 ./objs/bin/mtproto-proxy --help | head -n 60 || true
+
+      - name: Upload binary
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: lpac-openwrt-aarch64-musl-qmi-qrtr
-          path: dist/lpac-openwrt-aarch64-musl-qmi-qrtr.tar.gz
+          name: mtproto-proxy-aarch64-musl
+          path: objs/bin/mtproto-proxy
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mtproxy-build-debug
+          path: |
+            build.log
+            Makefile
+            Makefile.orig
+            deps/lib/libz.a
+            deps/lib/libcrypto.a
