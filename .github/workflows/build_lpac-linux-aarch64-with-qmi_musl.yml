@@ -6,6 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+
     env:
       SDK_TAG: aarch64_cortex-a53-24.10.5
 
@@ -35,7 +36,6 @@ jobs:
 
               ./scripts/feeds update -a
 
-              # Устанавливаем только build-зависимости, близкие к setup-qmi.sh upstream
               ./scripts/feeds install libcurl
               ./scripts/feeds install libmbim
               ./scripts/feeds install libqmi
@@ -47,6 +47,7 @@ jobs:
 
               TOOLCHAIN_BIN="$(find staging_dir/toolchain-* -type d -path "*/bin" | head -n1)"
               STAGING_DIR_TARGET="$(find staging_dir/target-* -maxdepth 0 -type d | head -n1)"
+
               test -n "$TOOLCHAIN_BIN"
               test -n "$STAGING_DIR_TARGET"
 
@@ -61,10 +62,10 @@ jobs:
               export CXXFLAGS="-Os -pipe"
               export LDFLAGS="-Wl,-rpath,/usr/lib/lpac"
 
-              rm -rf /work/build /work/stage /work/dist
-              mkdir -p /work/build /work/stage /work/dist
+              rm -rf /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
+              mkdir -p /tmp/lpac-build /tmp/lpac-stage /tmp/lpac-dist
 
-              cmake -S /work -B /work/build \
+              cmake -S /work -B /tmp/lpac-build \
                 -G "Unix Makefiles" \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_SYSTEM_NAME=Linux \
@@ -83,18 +84,19 @@ jobs:
                 -DLPAC_WITH_APDU_QMI_QRTR=ON \
                 -DLPAC_WITH_APDU_MBIM=ON
 
-              cmake --build /work/build -j"$(nproc)"
-              DESTDIR=/work/stage cmake --install /work/build
+              cmake --build /tmp/lpac-build -j"$(nproc)"
+              DESTDIR=/tmp/lpac-stage cmake --install /tmp/lpac-build
 
-              file /work/build/src/lpac || true
-              readelf -l /work/build/src/lpac | grep interpreter || true
-              readelf -d /work/build/src/lpac | grep NEEDED || true
+              file /tmp/lpac-build/src/lpac || true
+              readelf -l /tmp/lpac-build/src/lpac | grep interpreter || true
+              readelf -d /tmp/lpac-build/src/lpac | grep NEEDED || true
 
-              tar -C /work/stage -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
+              tar -C /tmp/lpac-stage -czf /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
+              cp -f /tmp/lpac-dist/lpac-openwrt-aarch64-musl-qmi.tar.gz /work/
             '
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: lpac-openwrt-aarch64-musl-qmi
-          path: dist/lpac-openwrt-aarch64-musl-qmi.tar.gz
+          path: lpac-openwrt-aarch64-musl-qmi.tar.gz
