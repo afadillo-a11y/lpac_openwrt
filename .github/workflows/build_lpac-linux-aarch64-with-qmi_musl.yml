@@ -1,4 +1,4 @@
-name: build-lpac-openwrt-aarch64-qmi
+name: build-lpac-openwrt-aarch64-musl-qmi
 
 on:
   workflow_dispatch:
@@ -6,89 +6,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-
     env:
       SDK_TAG: aarch64_cortex-a53-24.10.5
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Create custom OpenWrt package
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mkdir -p openwrt-feed/lpac
-
-          cat > openwrt-feed/lpac/Makefile <<'EOF'
-          include $(TOPDIR)/rules.mk
-
-          PKG_NAME:=lpac
-          PKG_VERSION:=2.3.0
-          PKG_RELEASE:=1
-
-          PKG_SOURCE_PROTO:=git
-          PKG_SOURCE_URL:=file:///work
-          PKG_SOURCE_VERSION:=HEAD
-          PKG_MIRROR_HASH:=skip
-
-          PKG_LICENSE:=AGPL-3.0-only LGPL-2.0-only
-          PKG_MAINTAINER:=custom
-          PKG_BUILD_PARALLEL:=1
-          CMAKE_INSTALL:=1
-
-          include $(INCLUDE_DIR)/package.mk
-          include $(INCLUDE_DIR)/cmake.mk
-
-          define Package/lpac
-            SECTION:=utils
-            CATEGORY:=Utilities
-            TITLE:=eUICC eSIM LPA written in C
-            URL:=https://github.com/estkme-group/lpac
-            DEPENDS:=+libcurl +libqmi +libqrtr-glib
-          endef
-
-          define Package/lpac/description
-            lpac built from the checked out git tree with QMI and QMI-over-QRTR enabled.
-          endef
-
-          TARGET_CFLAGS += $(FPIC)
-
-          CMAKE_OPTIONS += \
-            -DUSE_SYSTEM_DEPS=ON \
-            -DSTANDALONE_MODE=OFF \
-            -DLPAC_WITH_HTTP_CURL=ON \
-            -DLPAC_WITH_APDU_PCSC=OFF \
-            -DLPAC_WITH_APDU_AT=OFF \
-            -DLPAC_WITH_APDU_GBINDER=OFF \
-            -DLPAC_WITH_APDU_UQMI=OFF \
-            -DLPAC_WITH_APDU_MBIM=OFF \
-            -DLPAC_WITH_APDU_QMI=ON \
-            -DLPAC_WITH_APDU_QMI_QRTR=ON
-
-          define Package/lpac/install
-          	$(INSTALL_DIR) $(1)/usr/bin
-          	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
-
-          	$(INSTALL_DIR) $(1)/usr/lib
-          	if [ -d "$(PKG_INSTALL_DIR)/usr/lib/lpac" ]; then \
-          		$(CP) $(PKG_INSTALL_DIR)/usr/lib/lpac $(1)/usr/lib/; \
-          	fi
-          	if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so* >/dev/null 2>&1; then \
-          		$(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-drivers.so* $(1)/usr/lib/; \
-          	fi
-          	if ls $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so* >/dev/null 2>&1; then \
-          		$(CP) $(PKG_INSTALL_DIR)/usr/lib/libeuicc-driver-loader.so* $(1)/usr/lib/; \
-          	fi
-          endef
-
-          $(eval $(call BuildPackage,lpac))
-          EOF
-
-      - name: Build in OpenWrt SDK container
+      - name: Build in OpenWrt SDK
         shell: bash
         run: |
           set -euxo pipefail
@@ -106,39 +33,68 @@ jobs:
                 ./setup.sh
               fi
 
-              echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
-
               ./scripts/feeds update -a
-              ./scripts/feeds install -p custom lpac
 
-              printf "%s\n" "CONFIG_PACKAGE_lpac=y" > .config
+              # Устанавливаем только build-зависимости, близкие к setup-qmi.sh upstream
+              ./scripts/feeds install libcurl
+              ./scripts/feeds install libmbim
+              ./scripts/feeds install libqmi
+              ./scripts/feeds install libqrtr-glib
+              ./scripts/feeds install glib2
+              ./scripts/feeds install pkgconf
 
               make defconfig
-              make package/feeds/custom/lpac/clean V=s
-              make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
 
-              mkdir -p /work/dist /work/unpack
+              TOOLCHAIN_BIN="$(find staging_dir/toolchain-* -type d -path "*/bin" | head -n1)"
+              STAGING_DIR_TARGET="$(find staging_dir/target-* -maxdepth 0 -type d | head -n1)"
+              test -n "$TOOLCHAIN_BIN"
+              test -n "$STAGING_DIR_TARGET"
 
-              IPK="$(find bin/packages -type f -name "lpac_*.ipk" | head -n1)"
-              test -n "$IPK"
+              export PATH="$TOOLCHAIN_BIN:$PATH"
+              export CC=aarch64-openwrt-linux-musl-gcc
+              export CXX=aarch64-openwrt-linux-musl-g++
+              export AR=aarch64-openwrt-linux-musl-gcc-ar
+              export RANLIB=aarch64-openwrt-linux-musl-gcc-ranlib
+              export STRIP=aarch64-openwrt-linux-musl-strip
 
-              cp -v "$IPK" /work/dist/
+              export CFLAGS="-Os -pipe"
+              export CXXFLAGS="-Os -pipe"
+              export LDFLAGS="-Wl,-rpath,/usr/lib/lpac"
 
-              cd /work/unpack
-              ar x "$IPK"
-              tar -xf data.tar.gz
+              rm -rf /work/build /work/stage /work/dist
+              mkdir -p /work/build /work/stage /work/dist
 
-              file ./usr/bin/lpac
-              readelf -l ./usr/bin/lpac | grep interpreter || true
-              readelf -d ./usr/bin/lpac | grep NEEDED || true
+              cmake -S /work -B /work/build \
+                -G "Unix Makefiles" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=Linux \
+                -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+                -DCMAKE_INSTALL_PREFIX=/usr \
+                -DCMAKE_C_COMPILER="$CC" \
+                -DCMAKE_CXX_COMPILER="$CXX" \
+                -DCMAKE_FIND_ROOT_PATH="$STAGING_DIR_TARGET" \
+                -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+                -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+                -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+                -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
+                -DCMAKE_PREFIX_PATH="$STAGING_DIR_TARGET/usr" \
+                -DCMAKE_INSTALL_RPATH=/usr/lib/lpac \
+                -DLPAC_WITH_APDU_QMI=ON \
+                -DLPAC_WITH_APDU_QMI_QRTR=ON \
+                -DLPAC_WITH_APDU_MBIM=ON
 
-              tar -czf /work/dist/lpac-openwrt-aarch64-qmi-qrtr.tar.gz usr
+              cmake --build /work/build -j"$(nproc)"
+              DESTDIR=/work/stage cmake --install /work/build
+
+              file /work/build/src/lpac || true
+              readelf -l /work/build/src/lpac | grep interpreter || true
+              readelf -d /work/build/src/lpac | grep NEEDED || true
+
+              tar -C /work/stage -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
             '
 
-      - name: Upload artifacts
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lpac-openwrt-aarch64-qmi-qrtr
-          path: |
-            dist/lpac-openwrt-aarch64-qmi-qrtr.tar.gz
-            dist/*.ipk
+          name: lpac-openwrt-aarch64-musl-qmi
+          path: dist/lpac-openwrt-aarch64-musl-qmi.tar.gz
