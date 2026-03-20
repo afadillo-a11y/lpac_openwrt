@@ -16,14 +16,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare custom OpenWrt package and helper script
+      - name: Prepare custom OpenWrt feed and helper
         shell: bash
         run: |
           set -euxo pipefail
 
-          mkdir -p openwrt-feed/lpac
+          mkdir -p openwrt-feed
           mkdir -p .github/openwrt-helper
 
+          # Берем libqmi из openwrt/packages master, где уже 1.36.0
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git /tmp/openwrt-packages-master
+          git -C /tmp/openwrt-packages-master sparse-checkout set libs/libqmi
+          cp -a /tmp/openwrt-packages-master/libs/libqmi openwrt-feed/libqmi
+
+          # Кастомный пакет lpac
+          mkdir -p openwrt-feed/lpac
           cat > openwrt-feed/lpac/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
 
@@ -81,8 +88,14 @@ jobs:
           $(eval $(call BuildPackage,lpac))
           EOF
 
-          # Защита от потери табуляции в YAML
-          sed -i 's/^@/\t/' openwrt-feed/lpac/Makefile
+          # Меняем ведущий @ на TAB, чтобы не словить missing separator
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("openwrt-feed/lpac/Makefile")
+          text = p.read_text()
+          text = "\n".join(("\t" + line[1:]) if line.startswith("@") else line for line in text.splitlines()) + "\n"
+          p.write_text(text)
+          PY
 
           cat > .github/openwrt-helper/build.sh <<'EOF'
           #!/bin/bash
@@ -98,56 +111,40 @@ jobs:
           echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
 
           ./scripts/feeds update -a
-
-          # --- БЭКПОРТ СВЕЖЕЙ ВЕРСИИ LIBQMI ИЗ ВЕТКИ MASTER ---
-          echo "Подменяем старый libqmi (1.34.0) на свежую версию из master (>=1.36.0)..."
-          rm -rf feeds/packages/libs/libqmi
-          git clone --depth 1 https://github.com/openwrt/packages.git /tmp/pkg-master
-          cp -r /tmp/pkg-master/libs/libqmi feeds/packages/libs/
-          # -----------------------------------------------------
-
+          ./scripts/feeds install -p custom libqmi
           ./scripts/feeds install -p custom lpac
-          ./scripts/feeds install libcurl libmbim libqmi libqrtr-glib glib2 pkgconf
+          ./scripts/feeds install libcurl libmbim libqrtr-glib glib2 pkgconf
 
           cat >> .config <<'CFG'
+          CONFIG_PACKAGE_libqmi=y
           CONFIG_PACKAGE_lpac=y
           CONFIG_PACKAGE_libcurl=y
           CONFIG_PACKAGE_libmbim=y
-          CONFIG_PACKAGE_libqmi=y
           CONFIG_PACKAGE_libqrtr-glib=y
           CONFIG_PACKAGE_glib2=y
+          CONFIG_LIBQMI_WITH_QRTR_GLIB=y
+          CONFIG_LIBQMI_WITH_MBIM_QMUX=y
           CFG
 
           make defconfig
 
-          # Явная последовательная сборка для предотвращения гонки потоков
-          make package/glib2/compile V=s -j"$(nproc)"
-          make package/libmbim/compile V=s -j"$(nproc)"
-          make package/libqmi/compile V=s -j"$(nproc)"
-          make package/libqrtr-glib/compile V=s -j"$(nproc)"
-          make package/curl/compile V=s -j"$(nproc)"
-          
-          # Сборка lpac
+          # Сначала явно собираем custom libqmi 1.36.0, затем lpac
+          make package/feeds/custom/libqmi/compile V=s -j"$(nproc)"
           make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
 
           mkdir -p /work/dist /tmp/lpac-unpack
 
           IPK="$(find bin/packages -type f -name 'lpac_*.ipk' | head -n1)"
-          if [ -z "$IPK" ]; then
-            echo "Ошибка: Собранный IPK пакет не найден!"
-            exit 1
-          fi
+          test -n "$IPK"
 
-          # Копируем и переименовываем пакет для удобства (RAX3000M)
-          FINAL_IPK="lpac_2.3.0-1_aarch64_cortex-a53.ipk"
-          cp -v "$IPK" "/work/dist/$FINAL_IPK"
+          cp -v "$IPK" /work/dist/
 
-          # Распаковываем для tar.gz архива
           cd /tmp/lpac-unpack
-          ar x "/work/dist/$FINAL_IPK"
+          ar x "$IPK"
           tar -xf data.tar.*
 
           file ./usr/bin/lpac || true
+          readelf -l ./usr/bin/lpac | grep interpreter || true
           readelf -d ./usr/bin/lpac | grep NEEDED || true
 
           tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
@@ -170,7 +167,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lpac-rax3000m-package
+          name: lpac-openwrt-aarch64-musl-qmi
           path: |
             dist/*.ipk
             dist/*.tar.gz
