@@ -24,18 +24,17 @@ jobs:
           mkdir -p openwrt-feed
           mkdir -p .github/openwrt-helper
 
-          # Вытягиваем свежие libqmi, libmbim и libqrtr-glib из ветки master для совместимости
+          # Вытягиваем свежие libqmi, libmbim и libqrtr-glib из ветки master
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git /tmp/openwrt-packages-master
           git -C /tmp/openwrt-packages-master sparse-checkout set libs/libqmi libs/libmbim libs/libqrtr-glib
           cp -a /tmp/openwrt-packages-master/libs/libqmi openwrt-feed/libqmi
           cp -a /tmp/openwrt-packages-master/libs/libmbim openwrt-feed/libmbim
           cp -a /tmp/openwrt-packages-master/libs/libqrtr-glib openwrt-feed/libqrtr-glib
 
-          # ПАТЧИМ LIBQMI: Включаем полную коллекцию (ОБЯЗАТЕЛЬНО для работы UIM/eSIM)
+          # ПАТЧИМ LIBQMI: Включаем полную коллекцию для UIM
           sed -i 's/collection=minimal/collection=full/g' openwrt-feed/libqmi/Makefile
           sed -i 's/collection=basic/collection=full/g' openwrt-feed/libqmi/Makefile
 
-          # Кастомный пакет lpac
           mkdir -p openwrt-feed/lpac
           cat > openwrt-feed/lpac/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
@@ -78,7 +77,6 @@ jobs:
             -DLPAC_WITH_APDU_QMI_QRTR=ON \
             -DLPAC_WITH_APDU_MBIM=ON
 
-          # Обновленный блок установки: забираем ВСЕ библиотеки (.so*)
           define Package/lpac/install
           @$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/lib
           @$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/bin/lpac
@@ -93,7 +91,7 @@ jobs:
           $(eval $(call BuildPackage,lpac))
           EOF
 
-          # Меняем @ на TAB для Makefile
+          # Замена @ на TAB
           python3 - <<'PY'
           from pathlib import Path
           p = Path("openwrt-feed/lpac/Makefile")
@@ -109,12 +107,9 @@ jobs:
           git config --global --add safe.directory /work
           cd /builder
 
-          if [ ! -d ./scripts ]; then
-            ./setup.sh
-          fi
+          [ ! -d ./scripts ] && ./setup.sh
 
-          # ОЧИСТКА КЭША SDK ОТ СТАРЫХ ВЕРСИЙ
-          echo "Очищаем кэш SDK от старых версий QMI/MBIM..."
+          # Жесткая очистка кэша SDK от старых хидеров (вынужденная мера для Docker SDK)
           rm -rf staging_dir/target-*/usr/include/libqmi-glib staging_dir/target-*/usr/include/libmbim-glib
           rm -rf staging_dir/target-*/usr/lib/libqmi* staging_dir/target-*/usr/lib/libmbim*
           rm -rf staging_dir/target-*/usr/lib/pkgconfig/qmi-glib.pc staging_dir/target-*/usr/lib/pkgconfig/mbim-glib.pc
@@ -123,15 +118,12 @@ jobs:
           echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
 
           ./scripts/feeds update -a
-          
-          # Устанавливаем наши кастомные версии (приоритет выше дефолтных)
           ./scripts/feeds install -p custom libqrtr-glib
           ./scripts/feeds install -p custom libmbim
           ./scripts/feeds install -p custom libqmi
           ./scripts/feeds install -p custom lpac
           ./scripts/feeds install libcurl glib2 pkgconf
 
-          # Формируем конфигурацию
           cat >> .config <<'CFG'
           CONFIG_PACKAGE_libqmi=y
           CONFIG_PACKAGE_qmi-utils=y
@@ -148,7 +140,7 @@ jobs:
 
           make defconfig
 
-          # Собираем зависимости и lpac
+          # Последовательная сборка для стабильности
           make package/feeds/custom/libqrtr-glib/compile V=s -j"$(nproc)"
           make package/feeds/custom/libmbim/compile V=s -j"$(nproc)"
           make package/feeds/custom/libqmi/compile V=s -j"$(nproc)"
@@ -156,8 +148,6 @@ jobs:
 
           mkdir -p /work/dist /tmp/lpac-unpack
 
-          # Ищем ВСЕ скомпилированные .ipk пакеты и копируем в dist
-          echo "Копируем собранные пакеты..."
           find bin/ -type f -name "lpac_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "libqmi_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "qmi-utils_*.ipk" -exec cp -v {} /work/dist/ \;
@@ -165,11 +155,11 @@ jobs:
           find bin/ -type f -name "mbim-utils_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "libqrtr-glib_*.ipk" -exec cp -v {} /work/dist/ \;
 
-          # Создаем tar.gz для lpac (на всякий случай)
           LPAC_IPK="$(find /work/dist/ -name 'lpac_*.ipk' | head -n1)"
           if [ -n "$LPAC_IPK" ]; then
             cd /tmp/lpac-unpack
-            ar x "$LPAC_IPK"
+            # В новых версиях OpenWrt пакет .ipk - это tar, а не ar
+            tar -xf "$LPAC_IPK"
             tar -xf data.tar.*
             tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi.tar.gz usr
           fi
