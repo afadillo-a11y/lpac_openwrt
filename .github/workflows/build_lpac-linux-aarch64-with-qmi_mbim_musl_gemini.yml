@@ -1,0 +1,204 @@
+name: build-lpac-openwrt-qmi-mbim-at
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    env:
+      SDK_TAG: aarch64_cortex-a53-24.10.5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare custom OpenWrt feed and helper
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p openwrt-feed
+          mkdir -p .github/openwrt-helper
+
+          # Оставляем бэкпорт libqmi, libmbim и libqrtr-glib
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git /tmp/openwrt-packages-master
+          git -C /tmp/openwrt-packages-master sparse-checkout set libs/libqmi libs/libmbim libs/libqrtr-glib
+          cp -a /tmp/openwrt-packages-master/libs/libqmi openwrt-feed/libqmi
+          cp -a /tmp/openwrt-packages-master/libs/libmbim openwrt-feed/libmbim
+          cp -a /tmp/openwrt-packages-master/libs/libqrtr-glib openwrt-feed/libqrtr-glib
+
+          # ПАТЧИМ LIBQMI: Включаем полную коллекцию
+          sed -i 's/collection=minimal/collection=full/g' openwrt-feed/libqmi/Makefile
+          sed -i 's/collection=basic/collection=full/g' openwrt-feed/libqmi/Makefile
+
+          # Подготовка структуры lpac
+          mkdir -p openwrt-feed/lpac/files
+
+          # Создаем OpenWrt-style wrapper
+          cat > openwrt-feed/lpac/files/lpac.sh <<'EOF'
+          #!/bin/sh
+          : "${LPAC_APDU:=qmi}"
+          : "${LPAC_HTTP:=curl}"
+          : "${LPAC_APDU_QMI_DEVICE:=/dev/cdc-wdm0}"
+          : "${LPAC_APDU_QMI_UIM_SLOT:=1}"
+          exec /usr/lib/lpac "$@"
+          EOF
+          chmod +x openwrt-feed/lpac/files/lpac.sh
+
+          # Генерация Makefile для lpac
+          cat > openwrt-feed/lpac/Makefile <<'EOF'
+          include $(TOPDIR)/rules.mk
+
+          PKG_NAME:=lpac
+          PKG_VERSION:=2.3.0
+          PKG_RELEASE:=1
+
+          PKG_SOURCE:=v$(PKG_VERSION).tar.gz
+          PKG_SOURCE_URL:=https://github.com/estkme-group/lpac/archive/refs/tags/
+          PKG_HASH:=skip
+
+          PKG_LICENSE:=AGPL-3.0-only LGPL-2.0-only
+          PKG_MAINTAINER:=custom
+          PKG_BUILD_PARALLEL:=1
+          CMAKE_INSTALL:=1
+          PKG_BUILD_DEPENDS:=pkgconf/host
+
+          include $(INCLUDE_DIR)/package.mk
+          include $(INCLUDE_DIR)/cmake.mk
+
+          define Package/lpac
+            SECTION:=utils
+            CATEGORY:=Utilities
+            TITLE:=eUICC eSIM LPA (QMI+MBIM+AT Wrapper)
+            URL:=https://github.com/estkme-group/lpac
+            DEPENDS:=+libcurl +libqmi +libmbim +glib2
+          endef
+
+          define Package/lpac/description
+            lpac v2.3.0 built for OpenWrt with QMI, MBIM, and AT backends natively.
+          endef
+
+          # ПАТЧ ВЕРСИИ: Заменяем fallback "v0.0.0-unknown" на реальную версию пакета
+          define Build/Prepare
+          @$(call Build/Prepare/Default)
+          @sed -i 's/v0.0.0-unknown/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/CMakeLists.txt
+          endef
+
+          # Суженная backend-конфигурация (включены QMI, MBIM, AT)
+          CMAKE_OPTIONS += \
+            -DLPAC_DYNAMIC_DRIVERS=OFF \
+            -DLPAC_WITH_APDU_PCSC=OFF \
+            -DLPAC_WITH_APDU_AT=ON \
+            -DLPAC_WITH_APDU_UQMI=OFF \
+            -DLPAC_WITH_APDU_QMI=ON \
+            -DLPAC_WITH_APDU_QMI_QRTR=OFF \
+            -DLPAC_WITH_APDU_MBIM=ON \
+            -DLPAC_WITH_HTTP_CURL=ON
+
+          # Обновленный блок установки: wrapper в bin, бинарник в lib
+          define Package/lpac/install
+          @$(INSTALL_DIR) $(1)/usr/bin $(1)/usr/lib
+          @$(INSTALL_BIN) ./files/lpac.sh $(1)/usr/bin/lpac
+          @$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/lpac $(1)/usr/lib/lpac
+          endef
+
+          $(eval $(call BuildPackage,lpac))
+          EOF
+
+          # Замена @ на TAB для Makefile
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("openwrt-feed/lpac/Makefile")
+          text = p.read_text()
+          text = "\n".join(("\t" + line[1:]) if line.startswith("@") else line for line in text.splitlines()) + "\n"
+          p.write_text(text)
+          PY
+
+          # Сборочный скрипт (сокращенный пайплайн)
+          cat > .github/openwrt-helper/build.sh <<'EOF'
+          #!/bin/bash
+          set -euxo pipefail
+
+          cd /builder
+
+          [ ! -d ./scripts ] && ./setup.sh
+
+          # Жесткая очистка кэша SDK от старых хидеров
+          rm -rf staging_dir/target-*/usr/include/libqmi-glib staging_dir/target-*/usr/include/libmbim-glib
+          rm -rf staging_dir/target-*/usr/lib/libqmi* staging_dir/target-*/usr/lib/libmbim*
+          rm -rf staging_dir/target-*/usr/lib/pkgconfig/qmi-glib.pc staging_dir/target-*/usr/lib/pkgconfig/mbim-glib.pc
+          rm -f staging_dir/target-*/stamp/.libqmi_installed staging_dir/target-*/stamp/.libmbim_installed
+
+          echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
+
+          ./scripts/feeds update -a
+          
+          # Устанавливаем только необходимые компоненты
+          ./scripts/feeds install -p custom libqmi
+          ./scripts/feeds install -p custom libmbim
+          ./scripts/feeds install -p custom lpac
+          ./scripts/feeds install libcurl glib2 pkgconf
+
+          # Конфиг сборки
+          cat >> .config <<'CFG'
+          CONFIG_PACKAGE_libqmi=y
+          CONFIG_PACKAGE_qmi-utils=y
+          CONFIG_PACKAGE_libmbim=y
+          CONFIG_PACKAGE_mbim-utils=y
+          CONFIG_PACKAGE_lpac=y
+          CONFIG_PACKAGE_libcurl=y
+          CONFIG_PACKAGE_glib2=y
+          CONFIG_LIBQMI_COLLECTION_FULL=y
+          CFG
+
+          make defconfig
+
+          # Последовательная сборка скомпонована для предотвращения гонок
+          make package/feeds/custom/libmbim/compile V=s -j"$(nproc)"
+          make package/feeds/custom/libqmi/compile V=s -j"$(nproc)"
+          make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
+
+          mkdir -p /work/dist /tmp/lpac-unpack
+
+          echo "Копируем собранные пакеты..."
+          find bin/ -type f -name "lpac_*.ipk" -exec cp -v {} /work/dist/ \;
+          find bin/ -type f -name "libqmi_*.ipk" -exec cp -v {} /work/dist/ \;
+          find bin/ -type f -name "qmi-utils_*.ipk" -exec cp -v {} /work/dist/ \;
+          find bin/ -type f -name "libmbim_*.ipk" -exec cp -v {} /work/dist/ \;
+          find bin/ -type f -name "mbim-utils_*.ipk" -exec cp -v {} /work/dist/ \;
+
+          # Создаем tar.gz с враппером для быстрой диагностики
+          LPAC_IPK="$(find /work/dist/ -name 'lpac_*.ipk' | head -n1)"
+          if [ -n "$LPAC_IPK" ]; then
+            cd /tmp/lpac-unpack
+            tar -xf "$LPAC_IPK"
+            tar -xf data.tar.*
+            tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi-mbim-at-wrapper.tar.gz usr
+          fi
+          EOF
+
+          chmod +x .github/openwrt-helper/build.sh
+
+      - name: Build in OpenWrt SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker pull openwrt/sdk:${SDK_TAG}
+          docker run --rm \
+            --user root \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /builder \
+            openwrt/sdk:${SDK_TAG} \
+            /bin/bash /work/.github/openwrt-helper/build.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lpac-openwrt-aarch64-musl-qmi-mbim-at
+          path: |
+            dist/*.ipk
+            dist/*.tar.gz
