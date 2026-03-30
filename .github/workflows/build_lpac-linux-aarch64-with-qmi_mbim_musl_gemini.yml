@@ -24,21 +24,17 @@ jobs:
           mkdir -p openwrt-feed
           mkdir -p .github/openwrt-helper
 
-          # Оставляем бэкпорт libqmi, libmbim и libqrtr-glib
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git /tmp/openwrt-packages-master
           git -C /tmp/openwrt-packages-master sparse-checkout set libs/libqmi libs/libmbim libs/libqrtr-glib
           cp -a /tmp/openwrt-packages-master/libs/libqmi openwrt-feed/libqmi
           cp -a /tmp/openwrt-packages-master/libs/libmbim openwrt-feed/libmbim
           cp -a /tmp/openwrt-packages-master/libs/libqrtr-glib openwrt-feed/libqrtr-glib
 
-          # ПАТЧИМ LIBQMI: включаем полную коллекцию
           sed -i 's/collection=minimal/collection=full/g' openwrt-feed/libqmi/Makefile
           sed -i 's/collection=basic/collection=full/g' openwrt-feed/libqmi/Makefile
 
-          # Подготовка структуры lpac
           mkdir -p openwrt-feed/lpac/files
 
-          # OpenWrt-style wrapper
           cat > openwrt-feed/lpac/files/lpac.sh <<'EOF'
           #!/bin/sh
           : "${LPAC_APDU:=qmi}"
@@ -49,7 +45,6 @@ jobs:
           EOF
           chmod +x openwrt-feed/lpac/files/lpac.sh
 
-          # Makefile для lpac
           cat > openwrt-feed/lpac/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
 
@@ -82,11 +77,11 @@ jobs:
             lpac v2.3.0 built for OpenWrt with QMI, MBIM, and AT backends natively.
           endef
 
-          # ФИКС ВЕРСИИ: tarball не содержит .git, поэтому git describe падает в v0.0.0-unknown.
-          # Меняем fallback прямо в cmake/git-version.cmake.
           define Build/Prepare
           @$(call Build/Prepare/Default)
           @$(SED) 's/v0\.0\.0-unknown/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/cmake/git-version.cmake
+          @$(SED) 's/@LPAC_VERSION@/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/src/version.h.in
+          @$(SED) 's/"v0\.0\.0-unknown"/"v$(PKG_VERSION)"/g' $(PKG_BUILD_DIR)/src/applet/version.c
           endef
 
           CMAKE_OPTIONS += \
@@ -108,7 +103,6 @@ jobs:
           $(eval $(call BuildPackage,lpac))
           EOF
 
-          # Замена @ на TAB для make recipe lines
           python3 - <<'PY'
           from pathlib import Path
           p = Path("openwrt-feed/lpac/Makefile")
@@ -117,7 +111,6 @@ jobs:
           p.write_text(text)
           PY
 
-          # Сборочный скрипт
           cat > .github/openwrt-helper/build.sh <<'EOF'
           #!/bin/bash
           set -euxo pipefail
@@ -126,7 +119,6 @@ jobs:
 
           [ ! -d ./scripts ] && ./setup.sh
 
-          # Жесткая очистка кэша SDK от старых хидеров и библиотек
           rm -rf staging_dir/target-*/usr/include/libqmi-glib staging_dir/target-*/usr/include/libmbim-glib
           rm -rf staging_dir/target-*/usr/lib/libqmi* staging_dir/target-*/usr/lib/libmbim*
           rm -rf staging_dir/target-*/usr/lib/pkgconfig/qmi-glib.pc staging_dir/target-*/usr/lib/pkgconfig/mbim-glib.pc
@@ -135,7 +127,6 @@ jobs:
           echo "src-link custom /work/openwrt-feed" >> feeds.conf.default
 
           ./scripts/feeds update -a
-
           ./scripts/feeds install -p custom libqmi
           ./scripts/feeds install -p custom libmbim
           ./scripts/feeds install -p custom lpac
@@ -154,21 +145,22 @@ jobs:
 
           make defconfig
 
-          # Последовательная сборка для уменьшения вероятности гонок
+          make package/feeds/custom/libmbim/clean
+          make package/feeds/custom/libqmi/clean
+          make package/feeds/custom/lpac/clean
+
           make package/feeds/custom/libmbim/compile V=s -j"$(nproc)"
           make package/feeds/custom/libqmi/compile V=s -j"$(nproc)"
           make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
 
           mkdir -p /work/dist /tmp/lpac-unpack
 
-          echo "Копируем собранные пакеты..."
           find bin/ -type f -name "lpac_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "libqmi_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "qmi-utils_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "libmbim_*.ipk" -exec cp -v {} /work/dist/ \;
           find bin/ -type f -name "mbim-utils_*.ipk" -exec cp -v {} /work/dist/ \;
 
-          # Создаем tar.gz с wrapper + бинарником для быстрой диагностики
           LPAC_IPK="$(find /work/dist/ -name 'lpac_*.ipk' | head -n1)"
           if [ -n "$LPAC_IPK" ]; then
             cd /tmp/lpac-unpack
