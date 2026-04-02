@@ -2,13 +2,23 @@ name: build-lpac-openwrt-qmi-mbim-at
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g. v2.3.0-r3). Leave empty to build artifacts without publishing a release.'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
+    name: Build ${{ matrix.target.ext }} packages
     runs-on: ubuntu-24.04
-
-    env:
-      SDK_TAG: aarch64_cortex-a53-24.10.5
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { sdk: "aarch64_cortex-a53-24.10.5", ext: "ipk" }
+          - { sdk: "aarch64_cortex-a53-25.12.2", ext: "apk" }
 
     steps:
       - name: Checkout
@@ -24,17 +34,21 @@ jobs:
           mkdir -p openwrt-feed
           mkdir -p .github/openwrt-helper
 
+          # Keep backports of required libraries
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/packages.git /tmp/openwrt-packages-master
           git -C /tmp/openwrt-packages-master sparse-checkout set libs/libqmi libs/libmbim libs/libqrtr-glib
           cp -a /tmp/openwrt-packages-master/libs/libqmi openwrt-feed/libqmi
           cp -a /tmp/openwrt-packages-master/libs/libmbim openwrt-feed/libmbim
           cp -a /tmp/openwrt-packages-master/libs/libqrtr-glib openwrt-feed/libqrtr-glib
 
+          # PATCH LIBQMI: Enable full collection
           sed -i 's/collection=minimal/collection=full/g' openwrt-feed/libqmi/Makefile
           sed -i 's/collection=basic/collection=full/g' openwrt-feed/libqmi/Makefile
 
+          # Prepare lpac directory structure
           mkdir -p openwrt-feed/lpac/files
 
+          # Create OpenWrt-style wrapper
           cat > openwrt-feed/lpac/files/lpac.sh <<'EOF'
           #!/bin/sh
           : "${LPAC_APDU:=qmi}"
@@ -45,6 +59,7 @@ jobs:
           EOF
           chmod +x openwrt-feed/lpac/files/lpac.sh
 
+          # Generate Makefile for lpac
           cat > openwrt-feed/lpac/Makefile <<'EOF'
           include $(TOPDIR)/rules.mk
 
@@ -77,11 +92,13 @@ jobs:
             lpac v2.3.0 built for OpenWrt with QMI, MBIM, and AT backends natively.
           endef
 
+          # VERSION PATCH: Remove git describe and hardcode the actual version
           define Build/Prepare
           @$(call Build/Prepare/Default)
-          @$(SED) 's/v0\.0\.0-unknown/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/cmake/git-version.cmake
-          @$(SED) 's/@LPAC_VERSION@/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/src/version.h.in
-          @$(SED) 's/"v0\.0\.0-unknown"/"v$(PKG_VERSION)"/g' $(PKG_BUILD_DIR)/src/applet/version.c
+          @$(SED) 's/execute_process(COMMAND git describe.*//g' $(PKG_BUILD_DIR)/CMakeLists.txt
+          @$(SED) 's/if (NOT LPAC_VERSION)//g' $(PKG_BUILD_DIR)/CMakeLists.txt
+          @$(SED) 's/set(LPAC_VERSION "v0.0.0-unknown")/set(LPAC_VERSION "v$(PKG_VERSION)")/g' $(PKG_BUILD_DIR)/CMakeLists.txt
+          @$(SED) 's/endif ()//g' $(PKG_BUILD_DIR)/CMakeLists.txt
           endef
 
           CMAKE_OPTIONS += \
@@ -103,6 +120,7 @@ jobs:
           $(eval $(call BuildPackage,lpac))
           EOF
 
+          # Replace @ with TAB for the generated Makefile
           python3 - <<'PY'
           from pathlib import Path
           p = Path("openwrt-feed/lpac/Makefile")
@@ -111,14 +129,15 @@ jobs:
           p.write_text(text)
           PY
 
+          # Generate the build script payload
           cat > .github/openwrt-helper/build.sh <<'EOF'
           #!/bin/bash
           set -euxo pipefail
 
           cd /builder
-
           [ ! -d ./scripts ] && ./setup.sh
 
+          # Aggressive cleanup of SDK cache to remove old headers
           rm -rf staging_dir/target-*/usr/include/libqmi-glib staging_dir/target-*/usr/include/libmbim-glib
           rm -rf staging_dir/target-*/usr/lib/libqmi* staging_dir/target-*/usr/lib/libmbim*
           rm -rf staging_dir/target-*/usr/lib/pkgconfig/qmi-glib.pc staging_dir/target-*/usr/lib/pkgconfig/mbim-glib.pc
@@ -132,6 +151,7 @@ jobs:
           ./scripts/feeds install -p custom lpac
           ./scripts/feeds install libcurl glib2 pkgconf
 
+          # Build configuration
           cat >> .config <<'CFG'
           CONFIG_PACKAGE_libqmi=y
           CONFIG_PACKAGE_qmi-utils=y
@@ -144,23 +164,23 @@ jobs:
           CFG
 
           make defconfig
-
           make package/feeds/custom/libmbim/clean
           make package/feeds/custom/libqmi/clean
           make package/feeds/custom/lpac/clean
 
+          # Sequential compilation to prevent race conditions
           make package/feeds/custom/libmbim/compile V=s -j"$(nproc)"
           make package/feeds/custom/libqmi/compile V=s -j"$(nproc)"
           make package/feeds/custom/lpac/compile V=s -j"$(nproc)"
 
           mkdir -p /work/dist /tmp/lpac-unpack
 
-          find bin/ -type f -name "lpac_*.ipk" -exec cp -v {} /work/dist/ \;
-          find bin/ -type f -name "libqmi_*.ipk" -exec cp -v {} /work/dist/ \;
-          find bin/ -type f -name "qmi-utils_*.ipk" -exec cp -v {} /work/dist/ \;
-          find bin/ -type f -name "libmbim_*.ipk" -exec cp -v {} /work/dist/ \;
-          find bin/ -type f -name "mbim-utils_*.ipk" -exec cp -v {} /work/dist/ \;
+          # Find and copy both IPK and APK packages (naming conventions differ)
+          for pkg in lpac libqmi qmi-utils libmbim mbim-utils; do
+            find bin/ -type f \( -name "${pkg}_*.ipk" -o -name "${pkg}-*.apk" \) -exec cp -v {} /work/dist/ \;
+          done
 
+          # Create tar.gz wrapper only from the IPK build (to avoid duplication)
           LPAC_IPK="$(find /work/dist/ -name 'lpac_*.ipk' | head -n1)"
           if [ -n "$LPAC_IPK" ]; then
             cd /tmp/lpac-unpack
@@ -176,18 +196,50 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          docker pull openwrt/sdk:${SDK_TAG}
+          docker pull openwrt/sdk:${{ matrix.target.sdk }}
           docker run --rm \
             --user root \
             -v "${GITHUB_WORKSPACE}:/work" \
             -w /builder \
-            openwrt/sdk:${SDK_TAG} \
+            openwrt/sdk:${{ matrix.target.sdk }} \
             /bin/bash /work/.github/openwrt-helper/build.sh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lpac-openwrt-aarch64-musl-qmi-mbim-at
+          name: lpac-openwrt-${{ matrix.target.ext }}
           path: |
             dist/*.ipk
+            dist/*.apk
             dist/*.tar.gz
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    if: github.event.inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "Release ${{ github.event.inputs.release_tag }}"
+          draft: false
+          prerelease: false
+          files: release-assets/*
+          body: |
+            ### 📦 Automated build of `lpac v2.3.0` for OpenWrt aarch64
+            
+            This release includes packages compiled with **QMI, MBIM, and AT** support.
+            
+            - **`*.ipk`** — for OpenWrt 24.10.x and below (using opkg)
+            - **`*.apk`** — for OpenWrt 25.x (using apk-tools)
+            - **`*.tar.gz`** — binaries and wrapper archive for manual installation
