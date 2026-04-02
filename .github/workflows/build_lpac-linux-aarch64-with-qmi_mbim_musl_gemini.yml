@@ -92,13 +92,12 @@ jobs:
             lpac v2.3.0 built for OpenWrt with QMI, MBIM, and AT backends natively.
           endef
 
-          # VERSION PATCH: Remove git describe and hardcode the actual version
+          # VERSION PATCH: Correctly replace hardcoded version strings in source files
           define Build/Prepare
           @$(call Build/Prepare/Default)
-          @$(SED) 's/execute_process(COMMAND git describe.*//g' $(PKG_BUILD_DIR)/CMakeLists.txt
-          @$(SED) 's/if (NOT LPAC_VERSION)//g' $(PKG_BUILD_DIR)/CMakeLists.txt
-          @$(SED) 's/set(LPAC_VERSION "v0.0.0-unknown")/set(LPAC_VERSION "v$(PKG_VERSION)")/g' $(PKG_BUILD_DIR)/CMakeLists.txt
-          @$(SED) 's/endif ()//g' $(PKG_BUILD_DIR)/CMakeLists.txt
+          @$(SED) 's/v0\.0\.0-unknown/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/cmake/git-version.cmake
+          @$(SED) 's/@LPAC_VERSION@/v$(PKG_VERSION)/g' $(PKG_BUILD_DIR)/src/version.h.in
+          @$(SED) 's/"v0\.0\.0-unknown"/"v$(PKG_VERSION)"/g' $(PKG_BUILD_DIR)/src/applet/version.c
           endef
 
           CMAKE_OPTIONS += \
@@ -175,16 +174,24 @@ jobs:
 
           mkdir -p /work/dist /tmp/lpac-unpack
 
-          # Find and copy both IPK and APK packages (naming conventions differ)
+          # Find and copy both IPK and APK packages
           for pkg in lpac libqmi qmi-utils libmbim mbim-utils; do
             find bin/ -type f \( -name "${pkg}_*.ipk" -o -name "${pkg}-*.apk" \) -exec cp -v {} /work/dist/ \;
           done
 
+          # RENAME APKs: Append architecture to filename for GitHub Releases UX
+          cd /work/dist
+          for apk in *.apk; do
+            if [ -f "$apk" ]; then
+              mv "$apk" "${apk%.apk}_aarch64_cortex-a53.apk"
+            fi
+          done
+
           # Create tar.gz wrapper only from the IPK build (to avoid duplication)
-          LPAC_IPK="$(find /work/dist/ -name 'lpac_*.ipk' | head -n1)"
+          LPAC_IPK="$(find . -name 'lpac_*.ipk' | head -n1)"
           if [ -n "$LPAC_IPK" ]; then
             cd /tmp/lpac-unpack
-            tar -xf "$LPAC_IPK"
+            tar -xf "/work/dist/$LPAC_IPK"
             tar -xf data.tar.*
             tar -czf /work/dist/lpac-openwrt-aarch64-musl-qmi-mbim-at-wrapper.tar.gz usr
           fi
